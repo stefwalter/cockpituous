@@ -38,6 +38,11 @@ PACKAGE=""
 WORKDIR=""
 BRANCH=""
 
+fedpkg()
+{
+    /usr/bin/fedpkg --user stefw "$@"
+}
+
 usage()
 {
     echo "usage: release-koji [-kqv] -p SRPM BRANCH" >&2
