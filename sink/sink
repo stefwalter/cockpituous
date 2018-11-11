@@ -1,11 +1,9 @@
-#!/usr/bin/env python2
-
-from __future__ import print_function
+#!/usr/bin/env python3
 
 # Rough configuration file follows, place it in ~/.config/sink
 
 # PruneInterval [days] defaults to 0 (disabled)
-DEFAULTS = u"""
+DEFAULTS = """
 [Sink]
 Url: http://%(user)s.fedorapeople.org/logs/%(identifier)s/log
 Logs: ~/public_html/logs
@@ -23,8 +21,10 @@ Server: https://api.github.com
 TOKEN = "~/.config/github-token"
 
 import argparse
+import configparser
 import errno
 import fcntl
+import http.client
 import io
 import json
 import os
@@ -39,42 +39,11 @@ import tempfile
 import time
 import traceback
 import re
-import urllib
+import urllib.error
+import urllib.request
+import urllib.parse
 
-# Try Python 3, fail back to Python 2
-try:
-    from http.client import HTTPConnection
-    from http.client import HTTPSConnection
-except ImportError:
-    from httplib import HTTPConnection
-    from httplib import HTTPSConnection
-try:
-    from urllib.parse import urljoin
-    from urllib.parse import urlparse
-    from urllib.parse import parse_qs
-except ImportError:
-    from urlparse import urljoin
-    from urlparse import urlparse
-    from urlparse import parse_qs
-try:
-    from urllib.request import urlretrieve
-except ImportError:
-    from urllib import urlretrieve
-try:
-    from configparser import SafeConfigParser
-except ImportError:
-    from ConfigParser import SafeConfigParser
-try:
-    from io import StringIO
-    from io import BytesIO
-except ImportError:
-    from cStringIO import StringIO
-    from cStringIO import StringIO as BytesIO
-try:
-    MAX_BUFF_SIZE = sys.maxsize
-except:
-    MAX_BUFF_SIZE = sys.maxint
-
+MAX_BUFF_SIZE = sys.maxsize
 
 # Expansion of strings in JSON objects.
 
@@ -94,7 +63,7 @@ def expand_str(val, env):
     return re.sub(r':([-_.a-zA-Z0-9]+)|::', sub, val)
 
 def expand(val, env):
-    if isinstance(val, basestring):
+    if isinstance(val, str):
         return expand_str(val,env)
     elif isinstance(val, dict):
         return { k: expand(v, env) for k, v in val.items() }
@@ -137,7 +106,7 @@ def contains(expect, result, debug=True):
 class GitHub(object):
     def __init__(self, config):
         self.token = None
-        self.url = urlparse(config.get("GitHub", "Server"))
+        self.url = urllib.parse.urlparse(config.get("GitHub", "Server"))
         try:
             with open(os.path.expanduser(TOKEN), "r") as gt:
                 self.token = gt.read().strip()
@@ -161,9 +130,9 @@ class GitHub(object):
         if token:
             headers["Authorization"] = "token " + token
         if self.url.scheme == 'http':
-            conn = HTTPConnection(self.url.netloc, strict=True)
+            conn = http.client.HTTPConnection(self.url.netloc, strict=True)
         else:
-            conn = HTTPSConnection(self.url.netloc, strict=True)
+            conn = http.client.HTTPSConnection(self.url.netloc, strict=True)
         # conn.set_debuglevel(1)
         conn.request(method, resource, data and json.dumps(data) or None, headers)
         response = conn.getresponse()
@@ -337,7 +306,7 @@ class Extras(object):
     def push(self, data):
         if 'extras' in data:
             for url in data['extras']:
-                urlretrieve(url, os.path.basename(url))
+                urllib.request.urlretrieve(url, os.path.basename(url))
 
 class Status(object):
     def __init__(self, config, identifier):
@@ -347,7 +316,7 @@ class Status(object):
 
     def push(self, data, log):
         if "link" in data:
-            data["link"] = urljoin(self.link, data["link"], True)
+            data["link"] = urllib.parse.urljoin(self.link, data["link"], True)
         else:
             data["link"] = self.link
         for reporter in self.reporters:
@@ -554,8 +523,8 @@ def run(identifier, configfile, dry_run):
         user = os.environ.get("LOGNAME", os.getlogin())
     except:
         user = os.environ.get("LOGNAME", None)
-    config = SafeConfigParser({ "user": user, "identifier": "@@" })
-    config.readfp(StringIO(DEFAULTS))
+    config = configparser.SafeConfigParser({ "user": user, "identifier": "@@" })
+    config.readfp(io.StringIO(DEFAULTS))
     config.read([ os.path.expanduser(configfile or "~/.config/sink") ])
 
     # Create the directory and chdir
@@ -620,11 +589,11 @@ def run(identifier, configfile, dry_run):
 def cgi():
     stdout = sys.stdout
     sys.stdout = open("/dev/null", "w")
-    sys.stderr = errors = BytesIO()
+    sys.stderr = errors = io.BytesIO()
     status = ""
     result = 1
     try:
-        query = parse_qs(os.environ.get("QUERY_STRING", ""))
+        query = urllib.parse.parse_qs(os.environ.get("QUERY_STRING", ""))
         identifiers = query.get("identifier")
         identifier = identifiers and identifiers[0] or ''
         if os.environ.get("REQUEST_METHOD") != "POST":
