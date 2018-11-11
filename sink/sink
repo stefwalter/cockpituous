@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
 
 # Rough configuration file follows, place it in ~/.config/sink
 
+from __future__ import print_function
+
 # PruneInterval [days] defaults to 0 (disabled)
-DEFAULTS = """
+DEFAULTS = u"""
 [Sink]
 Url: http://%(user)s.fedorapeople.org/logs/%(identifier)s/log
 Logs: ~/public_html/logs
@@ -21,10 +23,8 @@ Server: https://api.github.com
 TOKEN = "~/.config/github-token"
 
 import argparse
-import configparser
 import errno
 import fcntl
-import http.client
 import io
 import json
 import os
@@ -39,11 +39,38 @@ import tempfile
 import time
 import traceback
 import re
-import urllib.error
-import urllib.request
-import urllib.parse
 
-MAX_BUFF_SIZE = sys.maxsize
+# Try Python 3, fail back to Python 2
+try:
+    from http.client import HTTPConnection
+    from http.client import HTTPSConnection
+except ImportError:
+    from httplib import HTTPConnection
+    from httplib import HTTPSConnection
+try:
+    from urllib.parse import urljoin
+    from urllib.parse import urlparse
+    from urllib.parse import parse_qs
+except ImportError:
+    from urlparse import urljoin
+    from urlparse import urlparse
+    from urlparse import parse_qs
+try:
+    from urllib.request import urlretrieve
+except ImportError:
+    from urllib import urlretrieve
+try:
+    from configparser import SafeConfigParser
+except ImportError:
+    from ConfigParser import SafeConfigParser
+try:
+    from io import StringIO
+except ImportError:
+    from cStringIO import StringIO
+try:
+    MAX_BUFF_SIZE = sys.maxsize
+except:
+    MAX_BUFF_SIZE = sys.maxint
 
 # Expansion of strings in JSON objects.
 
@@ -106,7 +133,7 @@ def contains(expect, result, debug=True):
 class GitHub(object):
     def __init__(self, config):
         self.token = None
-        self.url = urllib.parse.urlparse(config.get("GitHub", "Server"))
+        self.url = urlparse(config.get("GitHub", "Server"))
         try:
             with open(os.path.expanduser(TOKEN), "r") as gt:
                 self.token = gt.read().strip()
@@ -130,9 +157,9 @@ class GitHub(object):
         if token:
             headers["Authorization"] = "token " + token
         if self.url.scheme == 'http':
-            conn = http.client.HTTPConnection(self.url.netloc, strict=True)
+            conn = HTTPConnection(self.url.netloc, strict=True)
         else:
-            conn = http.client.HTTPSConnection(self.url.netloc, strict=True)
+            conn = HTTPSConnection(self.url.netloc, strict=True)
         # conn.set_debuglevel(1)
         conn.request(method, resource, data and json.dumps(data) or None, headers)
         response = conn.getresponse()
@@ -306,7 +333,7 @@ class Extras(object):
     def push(self, data):
         if 'extras' in data:
             for url in data['extras']:
-                urllib.request.urlretrieve(url, os.path.basename(url))
+                urlretrieve(url, os.path.basename(url))
 
 class Status(object):
     def __init__(self, config, identifier):
@@ -316,7 +343,7 @@ class Status(object):
 
     def push(self, data, log):
         if "link" in data:
-            data["link"] = urllib.parse.urljoin(self.link, data["link"], True)
+            data["link"] = urljoin(self.link, data["link"], True)
         else:
             data["link"] = self.link
         for reporter in self.reporters:
@@ -367,10 +394,9 @@ class Status(object):
         return used
 
 class Buffer(object):
-
     def __init__(self, fd):
         self.fd = fd
-        self.buf = ''
+        self.buf = b''
 
     def push(self, piece):
         self.buf = piece + self.buf
@@ -380,7 +406,7 @@ class Buffer(object):
 
     def read(self, n=MAX_BUFF_SIZE):
         result = self.buf
-        self.buf = ''
+        self.buf = b''
         while len(result) < n:
             want = n - len(result)
             data = os.read(self.fd, want > 1024 and 1024 or want)
@@ -391,7 +417,7 @@ class Buffer(object):
 
     def readone(self):
         result = self.buf
-        self.buf = ''
+        self.buf = b''
         result += os.read(self.fd, 1024)
         return result
 
@@ -523,8 +549,8 @@ def run(identifier, configfile, dry_run):
         user = os.environ.get("LOGNAME", os.getlogin())
     except:
         user = os.environ.get("LOGNAME", None)
-    config = configparser.SafeConfigParser({ "user": user, "identifier": "@@" })
-    config.readfp(io.StringIO(DEFAULTS))
+    config = SafeConfigParser({ "user": user, "identifier": "@@" })
+    config.readfp(StringIO(DEFAULTS))
     config.read([ os.path.expanduser(configfile or "~/.config/sink") ])
 
     # Create the directory and chdir
@@ -551,29 +577,29 @@ def run(identifier, configfile, dry_run):
     buffer = Buffer(0)
     attached = False
     count = 0          # Number of lines processed
-    last = ""          # Last full output valid line
+    last = b""         # Last full output valid line
     done = False       # Set when done
     while not done:
         sys.stdout.flush()
         data = buffer.readone()
         if not data:
             done = True
-        (text, zero, trailing) = (last + data).partition('\x00')
+        (text, zero, trailing) = (last + data).partition(b'\x00')
         if len(zero):
             buffer.push(trailing)
             attached = True
             done = True
-        lines = text.split("\n")
+        lines = text.split(b"\n")
         last = lines.pop()
         for line in lines:
-            line += "\n"
+            line += b"\n"
             count += 1
             if count == 1:
                 if status.begin(line, log):
                     continue
-            sys.stdout.write(line)
+            sys.stdout.write(line.decode(encoding='utf-8', errors='replace'))
     if not status.finish(last, log):
-        sys.stdout.write(last)
+        sys.stdout.write(last.decode(encoding='utf-8', errors='replace'))
 
     if attached:
         tar = subprocess.Popen(["tar", "-xzf", "-"], stdin=subprocess.PIPE)
@@ -589,11 +615,12 @@ def run(identifier, configfile, dry_run):
 def cgi():
     stdout = sys.stdout
     sys.stdout = open("/dev/null", "w")
-    sys.stderr = errors = io.BytesIO()
+    sys.stderr = errors = StringIO()
     status = ""
     result = 1
+
     try:
-        query = urllib.parse.parse_qs(os.environ.get("QUERY_STRING", ""))
+        query = parse_qs(os.environ.get("QUERY_STRING", ""))
         identifiers = query.get("identifier")
         identifier = identifiers and identifiers[0] or ''
         if os.environ.get("REQUEST_METHOD") != "POST":
@@ -603,17 +630,18 @@ def cgi():
             status = "405 Bad Request"
             raise RuntimeError("missing identifier")
         else:
-            status = "200 OK"
             result = run(identifier, None, False)
     except RuntimeError as ex:
         status = status or "500 Exception"
         errors.write("sink: " + str(ex) + "\n")
     except:
         status = "500 Exception"
-        errors.write(traceback.format_exc())
+        errors.write(traceback.format_exc().decode('utf-8', errors='replace'))
 
-    stdout.write("Status: " + status + "\n")
+    if status:
+        stdout.write("Status: " + status + "\n")
     stdout.write("Content-Type: text/plain\n\n")
+    stdout.flush()
     stdout.write(errors.getvalue())
     return result
 
