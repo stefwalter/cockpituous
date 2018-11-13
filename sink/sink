@@ -336,12 +336,13 @@ class Extras(object):
                 urlretrieve(url, os.path.basename(url))
 
 class Status(object):
-    def __init__(self, config, identifier):
-        self.reporters = [ GitHub(config), Irc(config), Extras(config) ]
+    def __init__(self, log, config, identifier):
+        self.reporters = [  ]
         self.link = config.get("Sink", "Url").replace('@@', identifier)
         self.data = None
+        self.log = log
 
-    def push(self, data, log):
+    def push(self, data):
         if "link" in data:
             data["link"] = urljoin(self.link, data["link"], True)
         else:
@@ -351,24 +352,29 @@ class Status(object):
                 reporter.push(data)
             except:
                 traceback.print_exc()
-                traceback.print_exc(file=log)
+                traceback.print_exc(file=self.log)
         self.data = data
 
-    def begin(self, line, log):
+    def begin(self, line):
         try:
             data = json.loads(line)
+            if not isinstance(data, dict):
+                data = None
         except:
+            data = None
+        if data:
+            self.push(data)
+            sys.stderr.write(data["link"] + "\n")
+            return True
+        else:
             sys.stderr.write(self.link + "\n")
             return False
-        self.push(data, log)
-        sys.stderr.write(data["link"] + "\n")
-        return True
 
     def clean_status(self, data):
         if "github" in data and "token" in data["github"]:
             del data['github']['token']
 
-    def finish(self, line, log):
+    def finish(self, line):
         if not self.data:
             return False
         used = False
@@ -384,7 +390,7 @@ class Status(object):
                 if "github" in data and "status" in data["github"]:
                     data["github"]["status"]["state"] = "error"
                     data["github"]["status"]["description"] = "Aborted without status"
-        self.push(data, log)
+        self.push(data)
         with open("status", "w") as fp:
             clean_data = data
             self.clean_status(clean_data)
@@ -420,21 +426,6 @@ class Buffer(object):
         self.buf = b''
         result += os.read(self.fd, 1024)
         return result
-
-class Tee():
-    def __init__(self, log, std):
-        self.log = log
-        self.std = std
-    def write(self, *args):
-        self.log.write(*args)
-        self.std.write(*args)
-    def flush(self, *args):
-        self.log.flush(*args)
-        self.std.flush(*args)
-    def close(self, *args):
-        self.log.close(*args)
-        self.log.close(*args)
-
 
 # Create the directory in a race free way
 def mkdir_and_chdir(base, identifier):
@@ -543,7 +534,7 @@ def check_prune(config, logs, dry_run):
                 prune_logs(logs, dry_run)
                 sys.exit(0)
 
-def run(identifier, configfile, dry_run):
+def prepare(identifier, configfile, dry_run):
     # Load up configuration if available
     try:
         user = os.environ.get("LOGNAME", os.getlogin())
@@ -566,42 +557,62 @@ def run(identifier, configfile, dry_run):
 
     mkdir_and_chdir(logs, identifier)
 
+    log = open("log", "wb")
+
     # Initialize status reporters
-    status = Status(config, identifier)
+    return Status(log, config, identifier)
 
-    log = open("log", "w")
-    sys.stdout = Tee(log, sys.stdout)
-    sys.stderr = Tee(log, sys.stderr)
+def blocking(fd, boolean):
+    flag = fcntl.fcntl(fd, fcntl.F_GETFD)
+    if boolean:
+        fcntl.fcntl(fd, fcntl.F_SETFD, flag &~ os.O_NONBLOCK)
+    else:
+        fcntl.fcntl(fd, fcntl.F_SETFD, flag | os.O_NONBLOCK)
 
-    # Now relay any data until zero byte
-    buffer = Buffer(0)
-    attached = False
-    count = 0          # Number of lines processed
-    last = b""         # Last full output valid line
-    done = False       # Set when done
-    while not done:
-        sys.stdout.flush()
-        data = buffer.readone()
-        if not data:
-            done = True
-        (text, zero, trailing) = (last + data).partition(b'\x00')
-        if len(zero):
-            buffer.push(trailing)
-            attached = True
-            done = True
-        lines = text.split(b"\n")
-        last = lines.pop()
-        for line in lines:
-            line += b"\n"
-            count += 1
-            if count == 1:
-                if status.begin(line, log):
-                    continue
-            sys.stdout.write(line.decode(encoding='utf-8', errors='replace'))
-    if not status.finish(last, log):
-        sys.stdout.write(last.decode(encoding='utf-8', errors='replace'))
+# Now relay any data until zero byte
+def run(status):
+    buffer = None
 
-    if attached:
+    log = status.log.fileno()
+    queues = { log: [], 1: [] }
+
+    blocking(0, False)
+    blocking(1, False)
+    blocking(log, False)
+
+    rset = [ 0 ]
+    wset = [ ]
+    while rset or queues:
+        ret = select.select(rset, wset, [], 10)
+        for rfd in ret[0]:
+            data = os.read(rfd, 1024)
+            (data, zero, trailing) = data.partition(b'\x00')
+            if trailing:
+                buffer = Buffer(rfd)
+                buffer.push(trailing)
+            if not data or trailing:
+                rset.remove(rfd)
+            else:
+                for wfd, queue in queues.items():
+                    queue.append(data)
+                    if not wset.count(wfd):
+                        wset.append(wfd)
+        for wfd in ret[1]:
+            if not queues[wfd]:
+                if not rset:
+                    del queues[wfd]
+                wset.remove(wfd)
+            else:
+                data = queues[wfd].pop(0)
+                bytes = os.write(wfd, data)
+                data = data[bytes:]
+                if data:
+                    queues[wfd].insert(0, data)
+
+    blocking(0, True)
+    blocking(1, True)
+
+    if buffer:
         tar = subprocess.Popen(["tar", "-xzf", "-"], stdin=subprocess.PIPE)
         shutil.copyfileobj(buffer, tar.stdin)
         tar.stdin.close()
@@ -613,37 +624,26 @@ def run(identifier, configfile, dry_run):
     return 0
 
 def cgi():
-    stdout = sys.stdout
-    sys.stdout = open("/dev/null", "w")
-    sys.stderr = errors = StringIO()
-    status = ""
-    result = 1
-
     try:
         query = parse_qs(os.environ.get("QUERY_STRING", ""))
         identifiers = query.get("identifier")
         identifier = identifiers and identifiers[0] or ''
-        if os.environ.get("REQUEST_METHOD") != "POST":
-            status = "405 Method Not Allowed"
-            errors.write("Use POST to send data\n")
+        method = os.environ.get("REQUEST_METHOD", "").upper()
+        if method not in [ "POST", "PUT" ]:
+            sys.stdout.write("Status: 405 Method Not Allowed\nContent-Type: text/plain\n\nUse POST to send data\n")
+            return 1
         elif not identifier:
-            status = "405 Bad Request"
-            raise RuntimeError("missing identifier")
+            sys.stdout.write("Status: 405 Bad Request\nContent-Type: text/plain\n\nMissing identifier\n")
+            return 1
         else:
-            result = run(identifier, None, False)
-    except RuntimeError as ex:
-        status = status or "500 Exception"
-        errors.write("sink: " + str(ex) + "\n")
+            status = prepare(identifier, None, False)
+            sys.stdout.write("Content-Type: text-plain\n\n")
+            sys.stdout.flush()
+            os.dup2(1, 2) # All stderr goes to log from here on out
+            return run(status)
     except:
-        status = "500 Exception"
-        errors.write(traceback.format_exc().decode('utf-8', errors='replace'))
-
-    if status:
-        stdout.write("Status: " + status + "\n")
-    stdout.write("Content-Type: text/plain\n\n")
-    stdout.flush()
-    stdout.write(errors.getvalue())
-    return result
+        sys.stderr.write(traceback.format_exc().decode('utf-8', errors='replace'))
+        return 1
 
 def main():
     parser = argparse.ArgumentParser(description="Sink logs from distributed processes")
@@ -654,7 +654,8 @@ def main():
     parser.add_argument("identifier", nargs=1)
     parser.set_defaults(verbosity=1)
     args = parser.parse_args()
-    return run(args.identifier[0], args.config, args.dry_run)
+
+    return run(prepare(args.identifier[0], args.config, args.dry_run))
 
 if __name__ == "__main__":
     if "REQUEST_METHOD" in os.environ:
