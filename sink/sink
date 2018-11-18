@@ -582,7 +582,10 @@ def run(status):
 
     rset = [ 0 ]
     wset = [ ]
-    while rset or queues:
+
+    # Continue while readable ... and anything queued for output
+    while rset or sum(map(lambda v: len(v), queues.values())) > 0:
+        sys.stderr.write("select {} {} {}\n".format(rset, wset, queues))
         ret = select.select(rset, wset, [], 10)
         for rfd in ret[0]:
             data = os.read(rfd, 1024)
@@ -592,25 +595,24 @@ def run(status):
                 buffer.push(trailing)
             if not data or trailing:
                 rset.remove(rfd)
-            else:
-                for wfd, queue in queues.items():
-                    queue.append(data)
-                    if not wset.count(wfd):
-                        wset.append(wfd)
+            for wfd, queue in queues.items():
+                queue.append(data)
+                if not wset.count(wfd):
+                    wset.append(wfd)
         for wfd in ret[1]:
+            data = queues[wfd].pop(0)
+            bytes = os.write(wfd, data)
+            sys.stderr.write("{} {}\n".format(wfd, bytes))
+            data = data[bytes:]
+            if data:
+                queues[wfd].insert(0, data)
             if not queues[wfd]:
-                if not rset:
-                    del queues[wfd]
                 wset.remove(wfd)
-            else:
-                data = queues[wfd].pop(0)
-                bytes = os.write(wfd, data)
-                data = data[bytes:]
-                if data:
-                    queues[wfd].insert(0, data)
 
+    sys.stderr.write("hello\n")
+    sys.stderr.flush()
     blocking(0, True)
-    blocking(1, True)
+    os.close(1)
 
     if buffer:
         tar = subprocess.Popen(["tar", "-xzf", "-"], stdin=subprocess.PIPE)
@@ -639,7 +641,7 @@ def cgi():
             status = prepare(identifier, None, False)
             sys.stdout.write("Content-Type: text-plain\n\n")
             sys.stdout.flush()
-            os.dup2(1, 2) # All stderr goes to log from here on out
+            # os.dup2(1, 2) # All stderr goes to log from here on out
             return run(status)
     except:
         sys.stderr.write(traceback.format_exc().decode('utf-8', errors='replace'))
